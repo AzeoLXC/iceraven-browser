@@ -127,7 +127,7 @@ jobs:
           keyStorePassword: ${{ secrets.DEBUG_KEY_STORE_PASSWORD }}
           keyPassword: ${{ secrets.DEBUG_KEY_PASSWORD }}
 
-      - name: Package & Checksum
+      - name: Package APKs
         run: |
           mkdir -p release_dist
           TAG="${{ needs.sync.outputs.release_tag }}"
@@ -135,11 +135,6 @@ jobs:
           cp gradle/build/app/outputs/apk/forkRelease/app-arm64-v8a-forkRelease.apk release_dist/Iceraven-${TAG}-arm64-v8a.apk
           cp gradle/build/app/outputs/apk/forkRelease/app-armeabi-v7a-forkRelease.apk release_dist/Iceraven-${TAG}-armeabi-v7a.apk
           cp gradle/build/app/outputs/apk/forkRelease/app-x86_64-forkRelease.apk release_dist/Iceraven-${TAG}-x86_64.apk
-
-          cd release_dist
-          for apk in *.apk; do
-            sha256sum "$apk" > "${apk}.sha256"
-          done
 
       - name: Publish GitHub Release
         env:
@@ -151,6 +146,6 @@ jobs:
           NOTES=$(printf "Iceraven Browser Automated Build\n- Upstream Engine: Fenix %s\n- Upstream Commit: %s\n- Build Tag: %s\n- Architectures: arm64-v8a, armeabi-v7a, x86_64" "$FENIX_VER" "$UPSTREAM_SHA" "$TAG")
 
           cd release_dist
-          gh release create "$TAG" *.apk *.sha256 \
+          gh release create "$TAG" *.apk \
             --title "$TAG" \
             --notes "$NOTES"
