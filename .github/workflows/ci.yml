@@ -1,4 +1,4 @@
-name: CI
+name: CI & Auto Release
 
 on:
   push:
@@ -6,9 +6,12 @@ on:
       - iceraven
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   release-automation:
-    name: Build App
+    name: Build & Release App
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -30,14 +33,20 @@ jobs:
         run: free -h
 
       - name: Create version name
-        run: echo "VERSION_NAME=$(git describe --tags HEAD)" >> $GITHUB_ENV
+        run: |
+          FENIX_VER=$(cat version.txt | tr -d '\n')
+          DATE_TAG=$(date +'%Y.%m.%d')
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          RELEASE_TAG="v${FENIX_VER}-${DATE_TAG}-${SHORT_SHA}"
+          echo "RELEASE_TAG=${RELEASE_TAG}" >> $GITHUB_ENV
+          echo "VERSION_NAME=${RELEASE_TAG}" >> $GITHUB_ENV
 
       - name: Patch on the fly
         run: |
           ./automation/iceraven/patch_android_components.sh
           ./automation/iceraven/setup_venv.sh
 
-      - name: Relpace strings
+      - name: Replace strings
         run: |
           sed -i 's/Firefox/Iceraven/g' app/src/*/res/values*/*strings.xml
           sed -i '/about_content/s/Mozilla/@forkmaintainers/' app/src/*/res/values*/*strings.xml
@@ -52,10 +61,6 @@ jobs:
         run: |
           /usr/bin/time -v ./gradlew app:assembleForkRelease -PversionName=${{ env.VERSION_NAME }} --stacktrace --no-daemon
 
-      - name: Debug
-        run: |
-          /usr/bin/ls -alh gradle/build/app/outputs/apk/forkRelease/
-
       - name: Create signed APKs
         uses: akliuxingyuan/sign-android-release@v2.0.1
         with:
@@ -65,24 +70,30 @@ jobs:
           keyStorePassword: ${{ secrets.DEBUG_KEY_STORE_PASSWORD }}
           keyPassword: ${{ secrets.DEBUG_KEY_PASSWORD }}
 
-      - name: Debug
+      - name: Prepare APKs for Release
         run: |
-          /usr/bin/ls -alh gradle/build/app/outputs/apk/forkRelease/
+          mkdir -p dist_apks
+          cp gradle/build/app/outputs/apk/forkRelease/app-arm64-v8a-forkRelease.apk dist_apks/Iceraven-${{ env.RELEASE_TAG }}-arm64-v8a.apk
+          cp gradle/build/app/outputs/apk/forkRelease/app-armeabi-v7a-forkRelease.apk dist_apks/Iceraven-${{ env.RELEASE_TAG }}-armeabi-v7a.apk
+          cp gradle/build/app/outputs/apk/forkRelease/app-x86_64-forkRelease.apk dist_apks/Iceraven-${{ env.RELEASE_TAG }}-x86_64.apk
 
-      - name: Upload arm64 apk
-        uses: actions/upload-artifact@v7
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          path: gradle/build/app/outputs/apk/forkRelease/app-arm64-v8a-forkRelease.apk
-          name: ${{ env.VERSION_NAME }}-arm64-v8a.apk
-
-      - name: Upload armeabi apk
-        uses: actions/upload-artifact@v7
-        with:
-          path: gradle/build/app/outputs/apk/forkRelease/app-armeabi-v7a-forkRelease.apk
-          name: ${{ env.VERSION_NAME }}-armeabi-v7a.apk
-
-      - name: Upload x86_64 apk
-        uses: actions/upload-artifact@v7
-        with:
-          path: gradle/build/app/outputs/apk/forkRelease/app-x86_64-forkRelease.apk
-          name: ${{ env.VERSION_NAME }}-x86_64.apk
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "Iceraven Browser ${{ env.RELEASE_TAG }}"
+          draft: false
+          prerelease: false
+          files: dist_apks/*.apk
+          body: |
+            ### Automated Clean Build
+            - **Upstream Fenix Engine:** ${{ env.VERSION_NAME }}
+            - **Commit:** ${{ github.sha }}
+            - **Release Tag:** ${{ env.RELEASE_TAG }}
+            
+            #### Download APK:
+            - **`arm64-v8a`**: Untuk mayoritas HP Android 64-bit modern
+            - **`armeabi-v7a`**: Untuk perangkat Android 32-bit (legacy)
+            - **`x86_64`**: Untuk emulator Android PC
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

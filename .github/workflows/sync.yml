@@ -1,0 +1,50 @@
+name: Daily Upstream Sync
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # Every day at 00:00 UTC (07:00 WIB)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sync:
+    name: Sync with Upstream
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: iceraven
+          fetch-depth: 0
+
+      - name: Check for upstream changes
+        id: check_upstream
+        run: |
+          git remote add upstream https://github.com/fork-maintainers/iceraven-browser.git
+          git fetch upstream iceraven
+          LOCAL=$(git rev-parse HEAD)
+          UPSTREAM=$(git rev-parse upstream/iceraven)
+          echo "Local SHA:    $LOCAL"
+          echo "Upstream SHA: $UPSTREAM"
+          if [ "$LOCAL" != "$UPSTREAM" ]; then
+            echo "New upstream changes detected!"
+            git config user.name "azeolxc"
+            git config user.email "azeolxc@gmail.com"
+            git merge --no-edit -m "chore(sync): merge upstream changes" upstream/iceraven
+            git push origin iceraven
+            echo "has_new_commits=true" >> $GITHUB_OUTPUT
+          else
+            echo "No upstream changes. Repo is already up to date."
+            echo "has_new_commits=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Trigger Build Workflow
+        if: steps.check_upstream.outputs.has_new_commits == 'true'
+        run: |
+          echo "Triggering build workflow..."
+          gh workflow run ci.yml --ref iceraven
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
