@@ -1,0 +1,156 @@
+name: Build & Release Iceraven
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force build even if no upstream changes'
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches:
+      - iceraven
+    paths-ignore:
+      - '.github/workflows/**'
+      - 'README.md'
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: 1. Upstream & Sync Check
+    runs-on: ubuntu-22.04
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      release_tag: ${{ steps.check.outputs.release_tag }}
+      fenix_version: ${{ steps.check.outputs.fenix_version }}
+      upstream_sha: ${{ steps.check.outputs.upstream_sha }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: iceraven
+          fetch-depth: 0
+
+      - name: Check Upstream Changes
+        id: check
+        run: |
+          git remote add upstream https://github.com/fork-maintainers/iceraven-browser.git
+          git fetch upstream iceraven
+
+          LOCAL=$(git rev-parse HEAD)
+          UPSTREAM=$(git rev-parse upstream/iceraven)
+          UPSTREAM_SHORT=$(echo "$UPSTREAM" | cut -c1-7)
+
+          echo "Local SHA:    $LOCAL"
+          echo "Upstream SHA: $UPSTREAM"
+          echo "upstream_sha=${UPSTREAM_SHORT}" >> $GITHUB_OUTPUT
+
+          FENIX_VER=$(cat version.txt 2>/dev/null | tr -d '\n\r' || echo "latest")
+          DATE_TAG=$(TZ=Asia/Jakarta date '+%Y%m%d_%H%M')
+          TAG="v${FENIX_VER}-${DATE_TAG}"
+          echo "fenix_version=${FENIX_VER}" >> $GITHUB_OUTPUT
+          echo "release_tag=${TAG}" >> $GITHUB_OUTPUT
+
+          SHOULD_BUILD=false
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            SHOULD_BUILD=true
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            SHOULD_BUILD=true
+          elif [ "$LOCAL" != "$UPSTREAM" ]; then
+            echo "New commits detected in upstream. Merging..."
+            git config user.name "azeolxc"
+            git config user.email "azeolxc@gmail.com"
+            git merge --no-edit upstream/iceraven
+            git push origin iceraven
+            SHOULD_BUILD=true
+          else
+            echo "Upstream is already up to date. Skipping build."
+          fi
+
+          if [ "${{ inputs.force_build }}" = "true" ]; then
+            SHOULD_BUILD=true
+          fi
+
+          echo "should_build=${SHOULD_BUILD}" >> $GITHUB_OUTPUT
+
+  build:
+    name: 2. Compile & Release APK
+    needs: sync
+    if: needs.sync.outputs.should_build == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          ref: iceraven
+          submodules: 'true'
+          fetch-depth: 0
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        run: ./automation/iceraven/install-sdk.sh
+
+      - name: Apply Patches
+        run: |
+          ./automation/iceraven/patch_android_components.sh
+          ./automation/iceraven/setup_venv.sh
+          sed -i 's/Firefox/Iceraven/g' app/src/*/res/values*/*strings.xml
+          sed -i '/about_content/s/Mozilla/@forkmaintainers/' app/src/*/res/values*/*strings.xml
+          sed -i '/<string name="trackers_blocked_panel_categorical_num_trackers_blocked">/s/%s/%1$s/g; /<string name="trackers_blocked_panel_categorical_num_trackers_blocked">/s/%d/%2$d/g' app/src/*/res/values*/*strings.xml
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Compile APK (forkRelease)
+        env:
+          GRADLE_OPTS: -Dorg.gradle.jvmargs="-XX:MaxMetaspaceSize=4g -Xms1g -Xmx7g -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/dev/stderr"
+        run: |
+          ./gradlew app:assembleForkRelease -PversionName=${{ needs.sync.outputs.release_tag }} --stacktrace --no-daemon
+
+      - name: Sign APKs
+        uses: akliuxingyuan/sign-android-release@v2.0.1
+        with:
+          releaseDir: gradle/build/app/outputs/apk/forkRelease/
+          signingKey: ${{ secrets.DEBUG_SIGNING_KEY }}
+          keyAlias: ${{ secrets.DEBUG_ALIAS }}
+          keyStorePassword: ${{ secrets.DEBUG_KEY_STORE_PASSWORD }}
+          keyPassword: ${{ secrets.DEBUG_KEY_PASSWORD }}
+
+      - name: Package & Checksum
+        run: |
+          mkdir -p release_dist
+          TAG="${{ needs.sync.outputs.release_tag }}"
+
+          cp gradle/build/app/outputs/apk/forkRelease/app-arm64-v8a-forkRelease.apk release_dist/Iceraven-${TAG}-arm64-v8a.apk
+          cp gradle/build/app/outputs/apk/forkRelease/app-armeabi-v7a-forkRelease.apk release_dist/Iceraven-${TAG}-armeabi-v7a.apk
+          cp gradle/build/app/outputs/apk/forkRelease/app-x86_64-forkRelease.apk release_dist/Iceraven-${TAG}-x86_64.apk
+
+          cd release_dist
+          for apk in *.apk; do
+            sha256sum "$apk" > "${apk}.sha256"
+          done
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.sync.outputs.release_tag }}
+          FENIX_VER: ${{ needs.sync.outputs.fenix_version }}
+          UPSTREAM_SHA: ${{ needs.sync.outputs.upstream_sha }}
+        run: |
+          NOTES=$(printf "Iceraven Browser Automated Build\n- Upstream Engine: Fenix %s\n- Upstream Commit: %s\n- Build Tag: %s\n- Architectures: arm64-v8a, armeabi-v7a, x86_64" "$FENIX_VER" "$UPSTREAM_SHA" "$TAG")
+
+          cd release_dist
+          gh release create "$TAG" *.apk *.sha256 \
+            --title "$TAG" \
+            --notes "$NOTES"
